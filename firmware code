@@ -1,1 +1,95 @@
+#include <Wire.h>
+#include <MPU6050.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
 
+// Temperature Sensor Setup on A0
+#define ONE_WIRE_BUS A0
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+MPU6050 mpu;
+
+volatile int rpmCount = 0;
+unsigned long lastMillis = 0;
+bool isCutoff = false; 
+
+// --- PIN DEFINITIONS ---
+const int soundPin = A1;      // Sound Sensor
+const int voltagePin = A2;    // ACS712 Current/Voltage Sensor
+const int vibSensorPin = 3;   // HW-072 Digital Vibration Sensor
+const int irPin = 2;          // IR RPM Sensor
+const int relayPin = 10;      // Relay Cutoff
+
+// Interrupt function for RPM
+void countRPM() { rpmCount++; }
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();
+  mpu.initialize();
+  sensors.begin();
+  
+  pinMode(irPin, INPUT);
+  pinMode(vibSensorPin, INPUT); 
+  pinMode(relayPin, OUTPUT);
+  
+  // Start with Relay ON (Motor runs)
+  digitalWrite(relayPin, HIGH); 
+  
+  // Attach interrupt to D2
+  attachInterrupt(digitalPinToInterrupt(irPin), countRPM, RISING);
+}
+
+void loop() {
+  // Read MPU6050
+  int16_t ax, ay, az, gx, gy, gz;
+  mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+  
+  // Read Digital Vibration Sensor
+  int digitalVib = digitalRead(vibSensorPin); 
+  
+  // Run logic every 1 second
+  if (millis() - lastMillis >= 1000) {
+    
+    // 1. Read Temperature
+    sensors.requestTemperatures(); 
+    float tempC = sensors.getTempCByIndex(0);
+
+    // 2. Read Current/Voltage on A2 (Assuming ACS712 20A)
+    float rawSensor = analogRead(voltagePin);
+    float amps = ((rawSensor / 1023.0) * 5.0 - 2.5) / 0.100; 
+
+    // 3. Read Sound Level on A1
+    int soundLevel = analogRead(soundPin);
+
+    // 4. Calculate RPM (Update '20' to match your encoder slots)
+    int slotsOnDisc = 20; 
+    int rpm = (rpmCount / slotsOnDisc) * 60; 
+    rpmCount = 0; // Reset counter
+    lastMillis = millis();
+
+    // --- SAFETY CUTOFF LOGIC ---
+    // Change these thresholds based on your motor's normal readings!
+    if (tempC > 45.0 || az > 10000 || amps > 2.0 || digitalVib == HIGH) { 
+      isCutoff = true;
+    }
+
+    // --- ACT ON CUTOFF ---
+    if (isCutoff) {
+      digitalWrite(relayPin, LOW);   // CUT POWER (Relay clicks off)
+    } else {
+      digitalWrite(relayPin, HIGH);  // KEEP POWER ON
+    }
+
+    // --- PRINT CSV FOR THE WEB APP ---
+    // Format: Temp, Vib, Gyro, RPM, Sound, Current, CutoffStatus
+    Serial.print(tempC); Serial.print(",");
+    Serial.print(az); Serial.print(",");
+    Serial.print(gz); Serial.print(",");
+    Serial.print(rpm); Serial.print(",");
+    Serial.print(soundLevel); Serial.print(",");
+    Serial.print(amps); Serial.print(",");
+    Serial.println(isCutoff ? "1" : "0"); 
+  }
+}
