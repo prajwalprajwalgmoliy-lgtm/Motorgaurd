@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Motor Health Monitor</title>
+<style>
+:root{--bg:#eceff0;--panel:#fff;--ink:#14201f;--mute:#5d6b69;--line:#d5dcdb;--grid:#e6eae9;--ok:#1f8a5b;--bad:#d9381e;--btn:#14201f;--btnink:#fff;color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#0f1514;--panel:#172120;--ink:#e6efed;--mute:#8da09d;--line:#2a3837;--grid:#233130;--ok:#3ecf8e;--bad:#ff6a4d;--btn:#e6efed;--btnink:#0f1514;color-scheme:dark}}
+:root[data-theme=dark]{--bg:#0f1514;--panel:#172120;--ink:#e6efed;--mute:#8da09d;--line:#2a3837;--grid:#233130;--ok:#3ecf8e;--bad:#ff6a4d;--btn:#e6efed;--btnink:#0f1514;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 Bahnschrift,"Segoe UI",system-ui,sans-serif}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:14px 20px;border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:5}
+h1{font-size:18px;margin:0 auto 0 0;font-weight:700}
+button,select,input{font:inherit;color:inherit}
+button{background:var(--btn);color:var(--btnink);border:0;border-radius:6px;padding:8px 14px;cursor:pointer;font-weight:600}
+button.ghost{background:transparent;color:var(--ink);border:1px solid var(--line)}
+button.danger{background:var(--bad);color:#fff}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--ok);outline-offset:2px}
+select,input{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:7px 9px}
+.pill{display:inline-flex;gap:8px;align-items:center;padding:6px 12px;border-radius:99px;border:1px solid var(--line);font-weight:600}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--mute)}
+.pill.on .dot{background:var(--ok)}
+.pill.cut .dot{background:var(--bad)}
+#banner{display:none;margin:16px 20px 0;padding:14px 18px;border-radius:8px;background:var(--bad);color:#fff;font-weight:700;align-items:center;gap:14px}
+#banner.show{display:flex}
+#banner span{flex:1}
+main{padding:16px 20px 40px;display:grid;gap:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 16px}
+.card.alert{border-color:var(--bad);box-shadow:0 0 0 1px var(--bad)}
+.top{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.top .n{color:var(--mute);font-weight:600}
+.val{font-size:34px;font-weight:700;font-variant-numeric:tabular-nums}
+.val small{font-size:15px;color:var(--mute);font-weight:600;margin-left:4px}
+.card.alert .val{color:var(--bad)}
+canvas{width:100%;height:150px;display:block;margin-top:6px;cursor:crosshair}
+.stats{display:flex;gap:16px;color:var(--mute);font-size:13px;font-variant-numeric:tabular-nums}
+.panel h2{font-size:15px;margin:0 0 10px}
+.row{display:flex;flex-wrap:wrap;gap:12px;align-items:end}
+label{display:grid;gap:3px;color:var(--mute);font-size:13px;font-weight:600}
+label input{width:110px}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:800px){.two{grid-template-columns:1fr}.grid{grid-template-columns:1fr}}
+#log{height:150px;overflow:auto;font:13px/1.5 Consolas,monospace;color:var(--mute);margin:0;white-space:pre-wrap}
+.note{color:var(--mute);font-size:13px;margin:8px 0 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>Motor health monitor</h1>
+  <span class="pill" id="status"><i class="dot"></i><b id="statusTxt">Disconnected</b></span>
+  <button id="btnConnect">Connect Arduino</button>
+  <button class="ghost" id="btnDemo">Demo mode</button>
+  <button class="ghost" id="btnTheme" aria-label="Toggle theme">Theme</button>
+</header>
+
+<div id="banner" role="alert"><span id="bannerTxt"></span><button id="btnResetB" style="background:#fff;color:#14201f">Restart motor</button></div>
+
+<main>
+  <div class="grid" id="cards"></div>
+
+  <div class="two">
+    <section class="card panel">
+      <h2>Safety limits</h2>
+      <div class="row">
+        <label>Temperature (°C)<input id="thT" type="number" step="0.5" value="45"></label>
+        <label>Vibration (p-p)<input id="thV" type="number" step="100" value="8000"></label>
+        <label>Current (A)<input id="thA" type="number" step="0.1" value="2"></label>
+        <label>Vib-sensor hits<input id="thH" type="number" step="1" value="50"></label>
+        <button id="btnApply">Send limits</button>
+      </div>
+      <p class="note">Limits are stored on the Arduino until it resets. Start-up surge is ignored for 3 seconds.</p>
+      <div class="row" style="margin-top:14px">
+        <button class="danger" id="btnCut">Cut power now</button>
+        <button id="btnReset">Restart motor</button>
+      </div>
+    </section>
+
+    <section class="card panel">
+      <h2>Graph &amp; data</h2>
+      <div class="row">
+        <label>Time window
+          <select id="win"><option value="30">Last 30 s</option><option value="120" selected>Last 2 min</option><option value="600">Last 10 min</option><option value="0">Everything</option></select>
+        </label>
+        <button class="ghost" id="btnPause">Pause graphs</button>
+        <button class="ghost" id="btnCsv">Download CSV</button>
+        <button class="ghost" id="btnClear">Clear</button>
+        <label style="display:flex;gap:6px;align-items:center;grid-auto-flow:column"><input type="checkbox" id="beep" style="width:auto" checked>Alarm sound</label>
+      </div>
+      <p class="note" id="rate">Samples: 0</p>
+      <pre id="log" aria-live="polite"></pre>
+    </section>
+  </div>
+</main>
+
+<script>
+const CH=[
+ {id:'temp',name:'Temperature',unit:'°C',color:'#e0572f',i:0,dec:1,lim:'thT'},
+ {id:'vib', name:'Vibration (MPU6050)',unit:'p-p',color:'#d99a0b',i:1,dec:0,lim:'thV'},
+ {id:'rpm', name:'Speed',unit:'RPM',color:'#2f7de0',i:3,dec:0},
+ {id:'amp', name:'Current',unit:'A',color:'#8a54d6',i:5,dec:2,lim:'thA'},
+ {id:'snd', name:'Sound level',unit:'p-p',color:'#1f9d6c',i:4,dec:0},
+ {id:'gyr', name:'Gyro Z',unit:'raw',color:'#d6478f',i:2,dec:0},
+ {id:'hit', name:'Vibration sensor hits',unit:'/0.5 s',color:'#5d7a8c',i:7,dec:0,lim:'thH'}
+];
+const REASONS=['','Temperature too high','Vibration too high','Current too high','Vibration sensor tripped','Manual cutoff'];
+const $=id=>document.getElementById(id);
+const T=[],D={};let cutoff=0,reason=0,paused=false,t0=performance.now(),hover=null;
+CH.forEach(c=>{D[c.id]=[];
+  const el=document.createElement('div');el.className='card';
+  el.innerHTML=`<div class="top"><span class="n">${c.name}</span><span class="val"><span class="v">--</span><small>${c.unit}</small></span></div><canvas></canvas><div class="stats"><span>min <b class="mn">-</b></span><span>avg <b class="av">-</b></span><span>max <b class="mx">-</b></span></div>`;
+  $('cards').appendChild(el);c.el=el;c.cv=el.querySelector('canvas');
+  c.cv.addEventListener('mousemove',e=>{hover=e.clientX-c.cv.getBoundingClientRect().left;need=true});
+  c.cv.addEventListener('mouseleave',()=>{hover=null;need=true});
+});
+function lim(c){return c.lim?parseFloat($(c.lim).value):null}
+function log(m){const l=$('log');l.textContent+=new Date().toLocaleTimeString()+'  '+m+'\n';l.scrollTop=l.scrollHeight}
+
+/* ---------- data ---------- */
+function ingest(f){
+  const t=(performance.now()-t0)/1000;T.push(t);
+  CH.forEach(c=>D[c.id].push(f[c.i]??0));
+  if(T.length>20000){T.shift();CH.forEach(c=>D[c.id].shift())}
+  const nc=f[6]?1:0,nr=f[8]||0;
+  if(nc&&!cutoff){log('CUTOFF: '+(REASONS[nr]||'unknown'));if($('beep').checked)beep()}
+  if(!nc&&cutoff)log('Motor running again');
+  cutoff=nc;reason=nr;
+  CH.forEach(c=>{const v=f[c.i],L=lim(c);c.el.querySelector('.v').textContent=v.toFixed(c.dec);
+    c.el.classList.toggle('alert',L!=null&&v>L)});
+  const s=$('status');s.className='pill '+(cutoff?'cut':'on');
+  $('statusTxt').textContent=cutoff?'Power cut':(demo?'Demo running':'Motor running');
+  $('banner').classList.toggle('show',!!cutoff);
+  $('bannerTxt').textContent='Motor power cut: '+(REASONS[reason]||'safety limit exceeded');
+  $('rate').textContent='Samples: '+T.length;need=true;
+}
+function parse(line){line=line.trim();if(!line)return;
+  if(line[0]==='#'){log(line.slice(1));return}
+  const f=line.split(',').map(Number);
+  if(f.length<7||f.some(isNaN))return;ingest(f)}
+
+/* ---------- charts ---------- */
+let need=true;
+function css(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim()}
+function draw(c){
+  const cv=c.cv,r=cv.getBoundingClientRect(),d=window.devicePixelRatio||1;
+  if(cv.width!==Math.round(r.width*d)){cv.width=Math.round(r.width*d);cv.height=Math.round(r.height*d)}
+  const x=cv.getContext('2d');x.setTransform(d,0,0,d,0,0);x.clearRect(0,0,r.width,r.height);
+  const W=r.width,H=r.height,pl=40,pr=6,pt=6,pb=16,n=T.length;
+  const w=+$('win').value,te=n?T[n-1]:0,ts=w?Math.max(0,te-w):0;
+  let i0=n;while(i0>0&&T[i0-1]>=ts)i0--;
+  const ys=D[c.id].slice(i0),L=lim(c);
+  let mn=Infinity,mx=-Infinity,sum=0;ys.forEach(v=>{mn=Math.min(mn,v);mx=Math.max(mx,v);sum+=v});
+  const st=c.el.querySelectorAll('.stats b');
+  st[0].textContent=ys.length?mn.toFixed(c.dec):'-';st[1].textContent=ys.length?(sum/ys.length).toFixed(c.dec):'-';st[2].textContent=ys.length?mx.toFixed(c.dec):'-';
+  let lo=ys.length?mn:0,hi=ys.length?mx:1;
+  if(L!=null){hi=Math.max(hi,L);lo=Math.min(lo,L)}
+  if(hi-lo<1e-6){hi=lo+1}
+  const pad=(hi-lo)*.1;lo-=pad;hi+=pad;if(c.id!=='temp'&&lo<0&&mn>=0)lo=0;
+  const X=t=>pl+(t-ts)/Math.max(te-ts,1)*(W-pl-pr),Y=v=>pt+(1-(v-lo)/(hi-lo))*(H-pt-pb);
+  x.font='11px Bahnschrift,Segoe UI,sans-serif';x.fillStyle=css('--mute');x.strokeStyle=css('--grid');x.lineWidth=1;
+  for(let g=0;g<=3;g++){const v=lo+(hi-lo)*g/3,y=Y(v);x.beginPath();x.moveTo(pl,y);x.lineTo(W-pr,y);x.stroke();x.textAlign='right';x.fillText(v.toFixed(c.dec>1?1:c.dec),pl-5,y+4)}
+  x.textAlign='left';x.fillText('-'+Math.round(te-ts)+'s',pl,H-3);x.textAlign='right';x.fillText('now',W-pr,H-3);
+  if(L!=null){x.strokeStyle=css('--bad');x.setLineDash([5,4]);x.beginPath();x.moveTo(pl,Y(L));x.lineTo(W-pr,Y(L));x.stroke();x.setLineDash([])}
+  if(ys.length>1){
+    x.beginPath();ys.forEach((v,k)=>{const px=X(T[i0+k]),py=Y(v);k?x.lineTo(px,py):x.moveTo(px,py)});
+    x.strokeStyle=c.color;x.lineWidth=2;x.stroke();
+    x.lineTo(X(T[n-1]),H-pb);x.lineTo(X(T[i0]),H-pb);x.closePath();x.globalAlpha=.12;x.fillStyle=c.color;x.fill();x.globalAlpha=1;
+  }
+  if(hover!=null&&ys.length>1){
+    let b=0,bd=1e9;ys.forEach((v,k)=>{const dd=Math.abs(X(T[i0+k])-hover);if(dd<bd){bd=dd;b=k}});
+    const px=X(T[i0+b]),py=Y(ys[b]);x.strokeStyle=css('--mute');x.beginPath();x.moveTo(px,pt);x.lineTo(px,H-pb);x.stroke();
+    x.fillStyle=c.color;x.beginPath();x.arc(px,py,4,0,7);x.fill();
+    const txt=ys[b].toFixed(c.dec)+' '+c.unit+' @ '+(T[i0+b]-te).toFixed(1)+'s',tw=x.measureText(txt).width+12,bx=Math.min(Math.max(px-tw/2,pl),W-pr-tw);
+    x.fillStyle=css('--ink');x.fillRect(bx,pt,tw,18);x.fillStyle=css('--panel');x.textAlign='left';x.fillText(txt,bx+6,pt+13);
+  }
+}
+(function loop(){if(need&&!paused){CH.forEach(draw);need=false}requestAnimationFrame(loop)})();
+addEventListener('resize',()=>need=true);
+
+/* ---------- serial ---------- */
+let port,reader,writer,rClosed,wClosed,demo=null;
+async function send(s){
+  if(demo){demoCmd(s);return}
+  if(!writer){log('Not connected');return}
+  await writer.write(s+'\n');
+}
+async function connect(){
+  if(!('serial' in navigator)){alert('Web Serial is not supported. Use Chrome or Edge on desktop, and open this file directly (not inside an iframe).');return}
+  try{
+    stopDemo();
+    port=await navigator.serial.requestPort();await port.open({baudRate:115200});
+    const dec=new TextDecoderStream();rClosed=port.readable.pipeTo(dec.writable).catch(()=>{});reader=dec.readable.getReader();
+    const enc=new TextEncoderStream();wClosed=enc.readable.pipeTo(port.writable).catch(()=>{});writer=enc.writable.getWriter();
+    $('btnConnect').textContent='Disconnect';$('statusTxt').textContent='Waiting for data...';$('status').className='pill on';log('Connected at 115200 baud');
+    t0=performance.now();
+    let buf='';
+    while(true){const{value,done}=await reader.read();if(done)break;buf+=value;const p=buf.split('\n');buf=p.pop();p.forEach(parse)}
+  }catch(e){log('Serial error: '+e.message)}
+  finally{await closePort()}
+}
+async function closePort(){
+  try{if(reader){await reader.cancel().catch(()=>{});await rClosed}}catch{}
+  try{if(writer){await writer.close().catch(()=>{});await wClosed}}catch{}
+  try{if(port)await port.close()}catch{}
+  reader=writer=port=null;$('btnConnect').textContent='Connect Arduino';
+  if(!demo){$('statusTxt').textContent='Disconnected';$('status').className='pill'}
+}
+$('btnConnect').onclick=()=>port?closePort():connect();
+
+/* ---------- controls ---------- */
+$('btnApply').onclick=async()=>{for(const[k,p]of[['thT','T'],['thV','V'],['thA','A'],['thH','H']])await send(p+':'+$(k).value);need=true};
+$('btnCut').onclick=()=>send('CUT');
+$('btnReset').onclick=$('btnResetB').onclick=()=>send('RESET');
+$('win').onchange=()=>need=true;
+$('btnPause').onclick=e=>{paused=!paused;e.target.textContent=paused?'Resume graphs':'Pause graphs';need=true};
+$('btnClear').onclick=()=>{T.length=0;CH.forEach(c=>D[c.id].length=0);t0=performance.now();need=true;$('rate').textContent='Samples: 0'};
+$('btnCsv').onclick=()=>{
+  const rows=['time_s,'+CH.map(c=>c.id).join(',')];
+  T.forEach((t,k)=>rows.push(t.toFixed(2)+','+CH.map(c=>D[c.id][k]).join(',')));
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([rows.join('\n')],{type:'text/csv'}));a.download='motor_data_'+Date.now()+'.csv';a.click()};
+$('btnTheme').onclick=()=>{const r=document.documentElement,d=r.dataset.theme==='dark'||(!r.dataset.theme&&matchMedia('(prefers-color-scheme:dark)').matches);r.dataset.theme=d?'light':'dark';need=true};
+CH.filter(c=>c.lim).forEach(c=>$(c.lim).addEventListener('input',()=>need=true));
+function beep(){try{const a=new AudioContext(),o=a.createOscillator(),g=a.createGain();o.frequency.value=880;o.connect(g);g.connect(a.destination);g.gain.value=.15;o.start();o.stop(a.currentTime+.4)}catch{}}
+
+/* ---------- demo mode (no hardware) ---------- */
+let dtimer,ds={t:30,rpm:1450,run:true,k:0,fault:0};
+function demoCmd(s){if(s==='CUT'){ds.run=false;ds.why=5}else if(s==='RESET'){ds.run=true;ds.fault=0;ds.why=0;ds.t=30}}
+function stopDemo(){clearInterval(dtimer);demo=null;$('btnDemo').textContent='Demo mode'}
+$('btnDemo').onclick=()=>{
+  if(demo){stopDemo();$('statusTxt').textContent='Disconnected';$('status').className='pill';return}
+  if(port)closePort();
+  demo=1;ds={t:30,rpm:1450,run:true,k:0,fault:0,why:0};t0=performance.now();$('btnDemo').textContent='Stop demo';log('Demo started: temperature slowly rises, motor trips automatically');
+  dtimer=setInterval(()=>{
+    const r=Math.random;ds.k++;
+    if(ds.run){ds.t+=.12+(ds.k>40?.25:0);}else ds.t-=.15;
+    const rpm=ds.run?ds.rpm+(r()-.5)*40:Math.max(0,(T.length?D.rpm[D.rpm.length-1]:0)*.6);
+    const vib=ds.run?2500+r()*1500+(ds.k>40?ds.k*40:0):200+r()*100;
+    const amp=ds.run?1.2+r()*.3:0,snd=ds.run?120+r()*60:20+r()*10,hit=ds.run?Math.floor(r()*8):0;
+    if(ds.run){if(ds.t>+$('thT').value){ds.run=false;ds.why=1}else if(vib>+$('thV').value){ds.run=false;ds.why=2}}
+    ingest([ds.t,vib,(r()-.5)*600,rpm,snd,amp,ds.run?0:1,hit,ds.run?0:ds.why]);
+  },500);
+};
+</script>
+</body>
+</html>
