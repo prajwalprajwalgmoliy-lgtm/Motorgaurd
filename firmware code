@@ -1,95 +1,193 @@
+/*
+  Motor Health Monitor - Arduino Uno
+  Sensors : DS18B20 (A0), Sound (A1), ACS712 (A2), HW-072 vibration (D3),
+            IR RPM (D2), MPU6050 (I2C: SDA=A4, SCL=A5), Relay (D10)
+
+  Serial output (115200 baud, every 500 ms), one CSV line:
+    temp,vibration,gyroZ,rpm,sound,amps,cutoff,vibHits,reason
+
+  reason: 0 none, 1 temperature, 2 vibration(MPU), 3 current, 4 vib-sensor, 5 manual
+
+  Serial commands from the web app (end with newline):
+    T:45     temperature limit (C)
+    V:8000   MPU6050 vibration limit (peak-to-peak raw units)
+    A:2.0    current limit (A)
+    H:50     vibration-sensor hits limit per window
+    CUT      cut power manually
+    RESET    clear cutoff and restart the motor
+*/
 #include <Wire.h>
 #include <MPU6050.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
 
-// Temperature Sensor Setup on A0
+// ---------- PINS ----------
 #define ONE_WIRE_BUS A0
+const int soundPin    = A1;
+const int currentPin  = A2;
+const int vibSensorPin = 3;
+const int irPin       = 2;
+const int relayPin    = 10;
+
+// ---------- SETTINGS ----------
+const int   SLOTS_ON_DISC = 20;      // slots/holes on your encoder disc
+const float ACS_SENS      = 0.100;   // ACS712: 20A=0.100, 30A=0.066, 5A=0.185 (V per A)
+const bool  RELAY_ACTIVE_HIGH = true; // set false for active-LOW relay modules
+const unsigned long WINDOW_MS = 500;  // report interval
+const unsigned long GRACE_MS  = 3000; // ignore start-up surge after (re)start
+
+// Limits (can be changed live from the web app)
+float limTemp = 45.0;
+long  limVib  = 8000;
+float limAmps = 2.0;
+int   limHits = 50;
+
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
-
 MPU6050 mpu;
 
-volatile int rpmCount = 0;
-unsigned long lastMillis = 0;
-bool isCutoff = false; 
+volatile unsigned long rpmCount = 0;
+unsigned long lastMillis = 0, startMillis = 0;
+bool isCutoff = false;
+int  reason = 0;
+float tempC = 0;
+float acsOffset = 512;
 
-// --- PIN DEFINITIONS ---
-const int soundPin = A1;      // Sound Sensor
-const int voltagePin = A2;    // ACS712 Current/Voltage Sensor
-const int vibSensorPin = 3;   // HW-072 Digital Vibration Sensor
-const int irPin = 2;          // IR RPM Sensor
-const int relayPin = 10;      // Relay Cutoff
+int16_t azMin = 32767, azMax = -32768, lastGz = 0;
+int soundMin = 1023, soundMax = 0;
+int vibHits = 0;
 
-// Interrupt function for RPM
 void countRPM() { rpmCount++; }
+
+void relayWrite(bool on) {
+  digitalWrite(relayPin, (on == RELAY_ACTIVE_HIGH) ? HIGH : LOW);
+}
+
+float readAmps() {                      // RMS over ~1 mains cycle (50 Hz)
+  float sq = 0;
+  const int N = 200;
+  for (int i = 0; i < N; i++) {
+    float dev = (analogRead(currentPin) - acsOffset) * (5.0 / 1023.0) / ACS_SENS;
+    sq += dev * dev;
+  }
+  return sqrt(sq / N);
+}
+
+void resetWindow() {
+  azMin = 32767; azMax = -32768;
+  soundMin = 1023; soundMax = 0;
+  vibHits = 0;
+}
 
 void setup() {
   Serial.begin(115200);
+  Serial.setTimeout(20);
   Wire.begin();
   mpu.initialize();
   sensors.begin();
-  
+  sensors.setResolution(10);
+  sensors.setWaitForConversion(false);   // non-blocking temperature reads
+  sensors.requestTemperatures();
+
   pinMode(irPin, INPUT);
-  pinMode(vibSensorPin, INPUT); 
+  pinMode(vibSensorPin, INPUT);
   pinMode(relayPin, OUTPUT);
-  
-  // Start with Relay ON (Motor runs)
-  digitalWrite(relayPin, HIGH); 
-  
-  // Attach interrupt to D2
+
+  // Calibrate ACS712 zero-current offset with power OFF
+  relayWrite(false);
+  delay(500);
+  long sum = 0;
+  for (int i = 0; i < 500; i++) sum += analogRead(currentPin);
+  acsOffset = sum / 500.0;
+
+  relayWrite(true);                       // motor runs
+  startMillis = lastMillis = millis();
   attachInterrupt(digitalPinToInterrupt(irPin), countRPM, RISING);
+  Serial.println(F("#Monitor ready"));
+}
+
+void handleSerial() {
+  if (!Serial.available()) return;
+  String cmd = Serial.readStringUntil('\n');
+  cmd.trim();
+  cmd.toUpperCase();
+  if (cmd.length() == 0) return;
+
+  if (cmd == "RESET") {
+    isCutoff = false; reason = 0;
+    startMillis = millis();
+    relayWrite(true);
+    Serial.println(F("#Reset: motor restarted"));
+  } else if (cmd == "CUT") {
+    isCutoff = true; reason = 5;
+    relayWrite(false);
+    Serial.println(F("#Manual cutoff"));
+  } else if (cmd.startsWith("T:")) { limTemp = cmd.substring(2).toFloat(); Serial.println(F("#Temp limit set")); }
+  else if (cmd.startsWith("V:"))   { limVib  = cmd.substring(2).toInt();   Serial.println(F("#Vibration limit set")); }
+  else if (cmd.startsWith("A:"))   { limAmps = cmd.substring(2).toFloat(); Serial.println(F("#Current limit set")); }
+  else if (cmd.startsWith("H:"))   { limHits = cmd.substring(2).toInt();   Serial.println(F("#Hits limit set")); }
 }
 
 void loop() {
-  // Read MPU6050
+  handleSerial();
+
+  // ----- fast sampling, tracked over the window -----
   int16_t ax, ay, az, gx, gy, gz;
   mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-  
-  // Read Digital Vibration Sensor
-  int digitalVib = digitalRead(vibSensorPin); 
-  
-  // Run logic every 1 second
-  if (millis() - lastMillis >= 1000) {
-    
-    // 1. Read Temperature
-    sensors.requestTemperatures(); 
-    float tempC = sensors.getTempCByIndex(0);
+  if (az < azMin) azMin = az;
+  if (az > azMax) azMax = az;
+  lastGz = gz;
 
-    // 2. Read Current/Voltage on A2 (Assuming ACS712 20A)
-    float rawSensor = analogRead(voltagePin);
-    float amps = ((rawSensor / 1023.0) * 5.0 - 2.5) / 0.100; 
+  int s = analogRead(soundPin);
+  if (s < soundMin) soundMin = s;
+  if (s > soundMax) soundMax = s;
 
-    // 3. Read Sound Level on A1
-    int soundLevel = analogRead(soundPin);
+  if (digitalRead(vibSensorPin) == HIGH) vibHits++;
 
-    // 4. Calculate RPM (Update '20' to match your encoder slots)
-    int slotsOnDisc = 20; 
-    int rpm = (rpmCount / slotsOnDisc) * 60; 
-    rpmCount = 0; // Reset counter
-    lastMillis = millis();
+  // ----- report every WINDOW_MS -----
+  unsigned long now = millis();
+  if (now - lastMillis >= WINDOW_MS) {
+    float dt = (now - lastMillis) / 1000.0;
+    lastMillis = now;
 
-    // --- SAFETY CUTOFF LOGIC ---
-    // Change these thresholds based on your motor's normal readings!
-    if (tempC > 45.0 || az > 10000 || amps > 2.0 || digitalVib == HIGH) { 
-      isCutoff = true;
+    // Temperature (value from previous request, then request next)
+    float t = sensors.getTempCByIndex(0);
+    if (t > -100) tempC = t;
+    sensors.requestTemperatures();
+
+    float amps = readAmps();
+
+    noInterrupts();
+    unsigned long pulses = rpmCount;
+    rpmCount = 0;
+    interrupts();
+    int rpm = (int)((pulses / (float)SLOTS_ON_DISC) / dt * 60.0);
+
+    // Vibration = peak-to-peak of Z accel (gravity offset cancels out)
+    long vib = (long)azMax - (long)azMin;
+    int sound = soundMax - soundMin;
+    int hits = vibHits;
+
+    // ----- safety cutoff (skipped during start-up grace period) -----
+    if (!isCutoff && (now - startMillis > GRACE_MS)) {
+      if (tempC > limTemp)          { isCutoff = true; reason = 1; }
+      else if (vib > limVib)        { isCutoff = true; reason = 2; }
+      else if (amps > limAmps)      { isCutoff = true; reason = 3; }
+      else if (hits >= limHits)     { isCutoff = true; reason = 4; }
     }
+    relayWrite(!isCutoff);
 
-    // --- ACT ON CUTOFF ---
-    if (isCutoff) {
-      digitalWrite(relayPin, LOW);   // CUT POWER (Relay clicks off)
-    } else {
-      digitalWrite(relayPin, HIGH);  // KEEP POWER ON
-    }
+    // ----- CSV for the web app -----
+    Serial.print(tempC, 1);  Serial.print(',');
+    Serial.print(vib);       Serial.print(',');
+    Serial.print(lastGz);    Serial.print(',');
+    Serial.print(rpm);       Serial.print(',');
+    Serial.print(sound);     Serial.print(',');
+    Serial.print(amps, 2);   Serial.print(',');
+    Serial.print(isCutoff ? 1 : 0); Serial.print(',');
+    Serial.print(hits);      Serial.print(',');
+    Serial.println(reason);
 
-    // --- PRINT CSV FOR THE WEB APP ---
-    // Format: Temp, Vib, Gyro, RPM, Sound, Current, CutoffStatus
-    Serial.print(tempC); Serial.print(",");
-    Serial.print(az); Serial.print(",");
-    Serial.print(gz); Serial.print(",");
-    Serial.print(rpm); Serial.print(",");
-    Serial.print(soundLevel); Serial.print(",");
-    Serial.print(amps); Serial.print(",");
-    Serial.println(isCutoff ? "1" : "0"); 
+    resetWindow();
   }
 }
